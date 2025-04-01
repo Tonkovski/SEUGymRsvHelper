@@ -17,10 +17,6 @@ import base64
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
-from io import BytesIO
-from PIL import Image
-import matplotlib.pyplot as plt
-
 import time
 import random
 
