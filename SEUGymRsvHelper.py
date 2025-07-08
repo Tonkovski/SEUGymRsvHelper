@@ -319,6 +319,7 @@ class SEUGymRsvHelper:
 
     def _generateTargetQueryList(self) -> list:
         target_list = self.config['target_list']
+        # id = self.config['target_list'][0]['resource_id']
         query_list = []
         
         for instance in target_list:
@@ -374,16 +375,45 @@ class SEUGymRsvHelper:
     def sleepTo1230pm(self):
         _logprint('Sleeping to 12:30 PM...')
         delta = self._timeTo1230pm()
-        while delta > 10:
+        
+        # 如果距离目标时间太近（小于30秒），直接跳过刷新登录
+        if delta <= 30:
+            _logprint('Too close to target time (%.2f seconds), skipping login refresh.' % delta)
+            if delta > 0:
+                time.sleep(delta)
+            return
+        
+        while delta > 30:  # 30秒刷新时间
             time.sleep(10)
             delta = self._timeTo1230pm()
+        
         _logprint('Trigger in bound in %s seconds.' % delta)
-
+        
+        # 记录刷新前的剩余时间
+        refresh_start_time = datetime.datetime.now()
+        remaining_time_before_refresh = self._timeTo1230pm()
+        
         _logprint('Refreshing login status...')
         self.login()
         self.auth()
         self.captcha_killer.updateKey(self.bearer_tk)
-        time.sleep(self._timeTo1230pm())
+        
+        # 计算刷新登录消耗的时间
+        refresh_duration = (datetime.datetime.now() - refresh_start_time).total_seconds()
+        _logprint('Login refresh took %.2f seconds.' % refresh_duration)
+        
+        # 重新计算剩余时间
+        final_delta = self._timeTo1230pm()
+        
+        # 如果已经过了目标时间，说明刷新登录耗时太长
+        if final_delta > 86000:  # 大于24小时-400秒，说明已经过了今天的12:30
+            _logprint('Warning: Missed target time due to login refresh delay!')
+            return
+        
+        # 如果还有剩余时间，继续等待
+        if final_delta > 0:
+            _logprint('Final wait: %.3f seconds.' % final_delta)
+            time.sleep(final_delta)
 
     def reviewTarget(self):
         infostr = ''
@@ -483,15 +513,30 @@ class SEUGymRsvHelper:
                 if rsv_info['code'] == '0':
                     _logprint('Reservation success!')
                     break
-                
+           
 if __name__ == '__main__':
     helper = SEUGymRsvHelper()
 
     # I am getting tired of all these query stuff,
     # so whatever, get those IDs yourself!!!
+    # # 提取并打印config.json中的元素
+    # print("=== Config Information ===")
+    # print(f"Username: {helper.config['username']}")
+    # print(f"Book Date: {helper.config['book_date']}")
+    
+    # # 提取target_list中的resource_id
+    # print("\n=== Target Resource IDs ===")
+    # for i, target in enumerate(helper.config['target_list']):
+    #     print(f"Target [{i+1}]:")
+    #     print(f"  Resource ID: {target['resource_id']}")
+    #     print(f"  Timeslot ID: {target['resource_timeslot_id']}")
+    
+    # # 使用第一个target的resource_id进行查询
+    # first_resource_id = helper.config['target_list'][0]['resource_id']
+    # print(f"\nUsing first resource ID: {first_resource_id}")
 
     # helper.queryShowResourceList('羽毛球场')
-    # helper.queryShowTimeslotList('a4d4aa89-9231-43a6-bf92-b86bb947e114')
+    # helper.queryShowTimeslotList(first_resource_id)
     # exit()
 
     helper.sleepTo1230pm()
