@@ -319,6 +319,7 @@ class SEUGymRsvHelper:
 
     def _generateTargetQueryList(self) -> list:
         target_list = self.config['target_list']
+        # id = self.config['target_list'][0]['resource_id']
         query_list = []
         
         for instance in target_list:
@@ -374,16 +375,45 @@ class SEUGymRsvHelper:
     def sleepTo1230pm(self):
         _logprint('Sleeping to 12:30 PM...')
         delta = self._timeTo1230pm()
-        while delta > 10:
+        
+        # 如果距离目标时间太近（小于30秒），直接跳过刷新登录
+        if delta <= 30:
+            _logprint('Too close to target time (%.2f seconds), skipping login refresh.' % delta)
+            if delta > 0:
+                time.sleep(delta)
+            return
+        
+        while delta > 30:  # 30秒刷新时间
             time.sleep(10)
             delta = self._timeTo1230pm()
+        
         _logprint('Trigger in bound in %s seconds.' % delta)
-
+        
+        # 记录刷新前的剩余时间
+        refresh_start_time = datetime.datetime.now()
+        remaining_time_before_refresh = self._timeTo1230pm()
+        
         _logprint('Refreshing login status...')
         self.login()
         self.auth()
         self.captcha_killer.updateKey(self.bearer_tk)
-        time.sleep(self._timeTo1230pm())
+        
+        # 计算刷新登录消耗的时间
+        refresh_duration = (datetime.datetime.now() - refresh_start_time).total_seconds()
+        _logprint('Login refresh took %.2f seconds.' % refresh_duration)
+        
+        # 重新计算剩余时间
+        final_delta = self._timeTo1230pm()
+        
+        # 如果已经过了目标时间，说明刷新登录耗时太长
+        if final_delta > 86000:  # 大于24小时-400秒，说明已经过了今天的12:30
+            _logprint('Warning: Missed target time due to login refresh delay!')
+            return
+        
+        # 如果还有剩余时间，继续等待
+        if final_delta > 0:
+            _logprint('Final wait: %.3f seconds.' % final_delta)
+            time.sleep(final_delta)
 
     def reviewTarget(self):
         infostr = ''
@@ -483,18 +513,221 @@ class SEUGymRsvHelper:
                 if rsv_info['code'] == '0':
                     _logprint('Reservation success!')
                     break
+    
+
+    def updateConfig(self):
+        """
+        交互式更新配置文件的功能
+        """
+        _logprint('Starting interactive config update...')
+        
+        # 1. 更新预订日期
+        print("\n=== Update Book Date ===")
+        current_date = self.config.get('book_date', '')
+        print(f"Current book date: {current_date}")
+        new_date = input("Enter new book date (YYYY-MM-DD) or press Enter to keep current: ").strip()
+        
+        if new_date:
+            # 验证日期格式
+            try:
+                datetime.datetime.strptime(new_date, "%Y-%m-%d")
+                self.config['book_date'] = new_date
+                self._saveConfig()
+                _logprint(f'Updated book_date to: {new_date}')
+            except ValueError:
+                _logerrorExit('Invalid date format. Please use YYYY-MM-DD format.')
+        
+        # 2. 查询并选择资源
+        print("\n=== Select Resources ===")
+        print("Querying available badminton courts...")
+        
+        # 获取羽毛球场资源列表
+        resource_type_id = self._getResourceTypeId('羽毛球场')
+        query = {'id_token_hint': self.id_tk}
+        payload = {
+            'operationName': 'findResourcesAllByAccount',
+            'query': (
+                'query findResourcesAllByAccount($first: Int, $offset: Int, $typeId: String, $typeName: String, $resourceName: String, $bookDate: String, $bookStartTime: String, $bookEndTime: String, $item_name: [String], $is_cyclicity: String, $cyclicity_start_date: String, $cyclicity_end_date: String, $cyclicity_start_time: String, $cyclicity_end_time: String, $cyclicity_strategy: String, $cyclicity_weekList: [String], $cyclicity_dayList: [String], $order_by: String, $cur_language: String, $filter: ResourcesFilterMap) {\n  findResourcesAllByAccount(first: $first, offset: $offset, typeId: $typeId, typeName: $typeName, resourceName: $resourceName, bookDate: $bookDate, bookStartTime: $bookStartTime, bookEndTime: $bookEndTime, item_name: $item_name, is_cyclicity: $is_cyclicity, cyclicity_start_date: $cyclicity_start_date, cyclicity_end_date: $cyclicity_end_date, cyclicity_start_time: $cyclicity_start_time, cyclicity_end_time: $cyclicity_end_time, cyclicity_strategy: $cyclicity_strategy, cyclicity_weekList: $cyclicity_weekList, cyclicity_dayList: $cyclicity_dayList, order_by: $order_by, cur_language: $cur_language, filter: $filter) {\n    id\n    resources_name\n    campus_name\n    building_name\n    floor_name\n    capacity\n    describe\n    available_number\n  }\n}\n'
+            ),
+            'variables': {
+                'typeId': resource_type_id,
+                'bookDate': self.config['book_date'],
+                'bookStartTime': '',
+                'bookEndTime': '',
+                'item_name': [],
+                'resourceName': '',
+                'account': self.config['username'],
+                'cur_language': 'zh',
+                'order_by': '',
+                'filter': {
+                    'campus_code': {'eq': ''},
+                    'building_code': {'eq': ''},
+                    'floor_code': {'eq': ''},
+                    'need_approve': {'eq': None}
+                }
+            }
+        }
+        
+        resp = self.sess.post(self._url_gym_sysquery, params=query, data=json.dumps(payload))
+        respdata = json.loads(resp.text)
+        resource_list = respdata['data']['findResourcesAllByAccount']
+        
+        # 显示可用资源
+        print("\nAvailable badminton courts:")
+        for i, res in enumerate(resource_list):
+            print(f"[{i+1}] {res['resources_name']} (ID: {res['id']})")
+            print(f"    Location: {res.get('campus_name', '')} {res.get('building_name', '')} {res.get('floor_name', '')}")
+            print(f"    Capacity: {res.get('capacity', 'N/A')}")
+            if res.get('describe'):
+                print(f"    Description: {res['describe']}")
+            print()
+        
+        # 选择资源并更新配置
+        new_target_list = []
+        
+        while True:
+            try:
+                choice = input("Select a court by number (or 'done' to finish, 'skip' to keep current targets): ").strip()
                 
+                if choice.lower() == 'done':
+                    break
+                elif choice.lower() == 'skip':
+                    _logprint('Keeping current target list unchanged.')
+                    return
+                
+                choice_idx = int(choice) - 1
+                if 0 <= choice_idx < len(resource_list):
+                    selected_resource = resource_list[choice_idx]
+                    resource_id = selected_resource['id']
+                    resource_name = selected_resource['resources_name']
+                    
+                    print(f"\nSelected: {resource_name}")
+                    print("Querying available time slots...")
+                    
+                    # 获取时间段列表
+                    resource_data = self._getResourceData(resource_id)
+                    timeslot_list = resource_data['resourcesTimeSlot']
+                    
+                    if not timeslot_list:
+                        print("No time slots available for this resource.")
+                        continue
+                    
+                    print("\nAvailable time slots:")
+                    for i, timeslot in enumerate(timeslot_list):
+                        print(f"[{i+1}] {timeslot['kssj']}-{timeslot['jssj']} (ID: {timeslot['id']})")
+                    
+                    # 选择时间段
+                    while True:
+                        try:
+                            slot_choice = input("Select a time slot by number: ").strip()
+                            slot_idx = int(slot_choice) - 1
+                            
+                            if 0 <= slot_idx < len(timeslot_list):
+                                selected_timeslot = timeslot_list[slot_idx]
+                                timeslot_id = selected_timeslot['id']
+                                timeslot_time = f"{selected_timeslot['kssj']}-{selected_timeslot['jssj']}"
+                                
+                                # 添加到目标列表
+                                target_entry = {
+                                    "resource_id": resource_id,
+                                    "resource_timeslot_id": timeslot_id
+                                }
+                                new_target_list.append(target_entry)
+                                
+                                _logprint(f'Added target: {resource_name} {timeslot_time}')
+                                print(f"Added: {resource_name} {timeslot_time}")
+                                break
+                            else:
+                                print("Invalid selection. Please try again.")
+                        except ValueError:
+                            print("Please enter a valid number.")
+                    
+                else:
+                    print("Invalid selection. Please try again.")
+                    
+            except ValueError:
+                print("Please enter a valid number or 'done'/'skip'.")
+        
+        # 更新配置文件
+        if new_target_list:
+            self.config['target_list'] = new_target_list
+            self._saveConfig()
+            _logprint(f'Updated target_list with {len(new_target_list)} targets.')
+            
+            # 显示更新后的配置
+            print("\n=== Updated Configuration ===")
+            print(f"Book Date: {self.config['book_date']}")
+            print("Target List:")
+            for i, target in enumerate(new_target_list):
+                resource_data = self._getResourceData(target['resource_id'])
+                timeslot = next(filter(
+                    lambda slot: slot['id'] == target['resource_timeslot_id'],
+                    resource_data['resourcesTimeSlot']
+                ), None)
+                if timeslot:
+                    print(f"  [{i+1}] {resource_data['resources_name']} {timeslot['kssj']}-{timeslot['jssj']}")
+        else:
+            _logprint('No targets were added.')
+
+    def _saveConfig(self):
+        """
+        保存配置到文件
+        """
+        with open(self._path_config, 'w', encoding='utf-8') as config_file:
+            json.dump(self.config, config_file, indent=2, ensure_ascii=False)
+
+
 if __name__ == '__main__':
     helper = SEUGymRsvHelper()
 
+    # 添加交互式配置更新选项
+    print("\n=== SEU Gym Reservation Helper ===")
+    print("1. Update configuration interactively")
+    print("2. Run reservation with current config")
+    print("3. Query resources and timeslots only")
+    
+    choice = input("Select an option (1-3): ").strip()
+    
+    if choice == '1':
+        helper.updateConfig()
+        print("\nConfiguration updated! You can now run the reservation or exit.")
+        run_reservation = input("Do you want to run reservation now? (y/n): ").strip().lower()
+        if run_reservation == 'y':
+            helper.sleepTo1230pm()
+            helper.reviewTarget()
+            helper.autoRsv()
+    elif choice == '2':
+        helper.sleepTo1230pm()
+        helper.reviewTarget()
+        helper.autoRsv()
+    elif choice == '3':
+        helper.queryShowResourceList('羽毛球场')
+        if helper.config['target_list']:
+            first_resource_id = helper.config['target_list'][0]['resource_id']
+            helper.queryShowTimeslotList(first_resource_id)
+    else:
+        print("Invalid choice. Exiting...")
+
     # I am getting tired of all these query stuff,
     # so whatever, get those IDs yourself!!!
+    # # 提取并打印config.json中的元素
+    # print("=== Config Information ===")
+    # print(f"Username: {helper.config['username']}")
+    # print(f"Book Date: {helper.config['book_date']}")
+    
+    # # 提取target_list中的resource_id
+    # print("\n=== Target Resource IDs ===")
+    # for i, target in enumerate(helper.config['target_list']):
+    #     print(f"Target [{i+1}]:")
+    #     print(f"  Resource ID: {target['resource_id']}")
+    #     print(f"  Timeslot ID: {target['resource_timeslot_id']}")
+    
+    # # 使用第一个target的resource_id进行查询
+    # first_resource_id = helper.config['target_list'][0]['resource_id']
+    # print(f"\nUsing first resource ID: {first_resource_id}")
 
     # helper.queryShowResourceList('羽毛球场')
-    # helper.queryShowTimeslotList('a4d4aa89-9231-43a6-bf92-b86bb947e114')
+    # helper.queryShowTimeslotList(first_resource_id)
     # exit()
 
-    helper.sleepTo1230pm()
-
-    helper.reviewTarget()
-    helper.autoRsv()
+    
